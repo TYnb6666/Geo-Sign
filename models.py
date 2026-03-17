@@ -86,6 +86,14 @@ class Uni_Sign(nn.Module):
         self.mt5_model    = MT5ForConditionalGeneration.from_pretrained(mt5_path)
         self.mt5_tokenizer= T5Tokenizer.from_pretrained(mt5_path, legacy=False)
         self.mt5_dim      = mt5_cfg.d_model
+
+        # V2 fusion head: temporal convolution before projection to mT5.
+        # Input/Output shape: (B, T, concat_dim) -> (B, T, concat_dim)
+        self.temporal_fusion = nn.Sequential(
+            nn.Conv1d(concat_dim, concat_dim, kernel_size=3, padding=1, bias=True),
+            nn.GELU(),
+            nn.Dropout(p=0.1),
+        )
         self.pose_proj    = nn.Linear(concat_dim, self.mt5_dim)
 
         self.apply(self._init_weights)
@@ -153,6 +161,11 @@ class Uni_Sign(nn.Module):
 
             if len(active_modes) == len(self.modes):
                 pose_features_biased = concatenated_feats + self.part_para
+
+            # V2: temporal conv fusion over the time axis before mT5 projection
+            pose_features_biased = self.temporal_fusion(
+                pose_features_biased.transpose(1, 2)
+            ).transpose(1, 2)
 
             # Project to mT5 dimension
             pose_emb = self.pose_proj(pose_features_biased)
@@ -225,6 +238,10 @@ class Uni_Sign(nn.Module):
                 pose_features_biased = concatenated_feats
                 if len(active_modes) == len(self.modes):
                      pose_features_biased += self.part_para
+
+                pose_features_biased = self.temporal_fusion(
+                    pose_features_biased.transpose(1, 2)
+                ).transpose(1, 2)
 
                 pose_emb = self.pose_proj(pose_features_biased)
                 prefix_ids    = pc["prefix_ids"].long()
