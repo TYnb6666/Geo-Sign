@@ -1,0 +1,11 @@
+这一版是使用提取的CSL-Daily的3维数据进行训练，因为通道不匹配的问题，所以没有加载Visual Encoder的预训练权重，而是冷启动完全重新开始学习，
+所以在下一版中将寻找使用Visual Encoder的预训练权重的部分模块来热启动的方法
+* Evaluation Complete (test - Rank 0 Results):
+  loss: 5.6397
+  bleu1: 39.7404
+  bleu2: 27.8884
+  bleu3: 20.7658
+  bleu4: 16.0022
+  rouge: 40.8576
+Current best bleu4: 15.99
+Training completed in 9:22:25
