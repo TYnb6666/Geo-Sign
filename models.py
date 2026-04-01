@@ -39,6 +39,7 @@ class Uni_Sign(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.args = args
+        self.text_decoder = getattr(args, "text_decoder", "mt5")
 
         # 支持 body, left, right, face_all 四种模式
         self.modes = ["body", "left", "right", "face_all"]
@@ -81,12 +82,32 @@ class Uni_Sign(nn.Module):
         # 3. Projection to mT5
         concat_dim    = final_dim_gcn * len(self.modes)
         self.part_para = nn.Parameter(torch.zeros(concat_dim))
+        self.mt5_tokenizer = T5Tokenizer.from_pretrained(mt5_path, legacy=False)
+        self.vocab_size = self.mt5_tokenizer.vocab_size
 
-        mt5_cfg           = MT5ForConditionalGeneration.from_pretrained(mt5_path).config
-        self.mt5_model    = MT5ForConditionalGeneration.from_pretrained(mt5_path)
-        self.mt5_tokenizer= T5Tokenizer.from_pretrained(mt5_path, legacy=False)
-        self.mt5_dim      = mt5_cfg.d_model
-        self.pose_proj    = nn.Linear(concat_dim, self.mt5_dim)
+        if self.text_decoder == "mt5":
+            mt5_cfg = MT5ForConditionalGeneration.from_pretrained(mt5_path).config
+            self.mt5_model = MT5ForConditionalGeneration.from_pretrained(mt5_path)
+            self.mt5_dim = mt5_cfg.d_model
+            self.pose_proj = nn.Linear(concat_dim, self.mt5_dim)
+        elif self.text_decoder == "transformer":
+            self.mt5_model = None
+            self.mt5_dim = int(getattr(args, "hidden_dim", 768))
+            self.pose_proj = nn.Linear(concat_dim, self.mt5_dim)
+            self.prefix_embed = nn.Embedding(self.vocab_size, self.mt5_dim)
+            self.tgt_embed = nn.Embedding(self.vocab_size, self.mt5_dim)
+            self.pos_embed = nn.Embedding(2048, self.mt5_dim)
+            decoder_layer = nn.TransformerDecoderLayer(
+                d_model=self.mt5_dim,
+                nhead=8,
+                dim_feedforward=self.mt5_dim * 4,
+                dropout=0.1,
+                batch_first=True,
+            )
+            self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=4)
+            self.lm_head = nn.Linear(self.mt5_dim, self.vocab_size)
+        else:
+            raise ValueError(f"Unsupported text_decoder: {self.text_decoder}")
 
         self.apply(self._init_weights)
 
@@ -100,8 +121,8 @@ class Uni_Sign(nn.Module):
             nn.init.ones_(m.weight); nn.init.zeros_(m.bias)
 
     def forward(self, src_input: Dict, tgt_input: Dict) -> Dict[str, torch.Tensor]:
-        if self.mt5_model is None or self.mt5_tokenizer is None:
-            raise RuntimeError("mT5 model or tokenizer not loaded.")
+        if self.mt5_tokenizer is None:
+            raise RuntimeError("Tokenizer not loaded.")
 
         out = {}
         compute_dtype = self.pose_proj.weight.dtype
@@ -160,22 +181,56 @@ class Uni_Sign(nn.Module):
             # ========== 2. Text Decoding (mT5) ==========================
             prefix_ids    = src_input["prefix_ids"].long()
             prefix_mask   = src_input["prefix_mask"]
-            
-            inputs_embeds = torch.cat([self.mt5_model.encoder.embed_tokens(prefix_ids), pose_emb], dim=1)
-            attention_mask= torch.cat([prefix_mask, src_input["attention_mask"]], dim=1)
-            
             labels        = tgt_input["labels_ids"].long()
             labels_masked = labels.clone()
             labels_masked[labels_masked == self.mt5_tokenizer.pad_token_id] = -100
 
-            mt5_out = self.mt5_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask,
-                                     labels=labels_masked, return_dict=True, output_hidden_states=True)
-            logits  = mt5_out.logits
-            
-            ce_loss = F.cross_entropy(logits.view(-1, logits.size(-1)).float(),
-                                      labels_masked.view(-1),
-                                      label_smoothing=getattr(self.args, 'label_smoothing', 0.0),
-                                      ignore_index=-100)
+            if self.text_decoder == "mt5":
+                inputs_embeds = torch.cat([self.mt5_model.encoder.embed_tokens(prefix_ids), pose_emb], dim=1)
+                attention_mask= torch.cat([prefix_mask, src_input["attention_mask"]], dim=1)
+
+                mt5_out = self.mt5_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask,
+                                         labels=labels_masked, return_dict=True, output_hidden_states=True)
+                logits  = mt5_out.logits
+                
+                ce_loss = F.cross_entropy(logits.view(-1, logits.size(-1)).float(),
+                                          labels_masked.view(-1),
+                                          label_smoothing=getattr(self.args, 'label_smoothing', 0.0),
+                                          ignore_index=-100)
+            else:
+                prefix_emb = self.prefix_embed(prefix_ids)
+                inputs_embeds = torch.cat([prefix_emb, pose_emb], dim=1)
+                attention_mask = torch.cat([prefix_mask, src_input["attention_mask"]], dim=1)
+                memory_key_padding_mask = ~attention_mask.bool()
+
+                y_in = labels[:, :-1]
+                y_out = labels[:, 1:]
+                y_out_masked = y_out.clone()
+                y_out_masked[y_out_masked == self.mt5_tokenizer.pad_token_id] = -100
+
+                tgt_emb = self.tgt_embed(y_in) + self.pos_embed(
+                    torch.arange(y_in.size(1), device=y_in.device).unsqueeze(0)
+                )
+                tgt_key_padding_mask = (y_in == self.mt5_tokenizer.pad_token_id)
+                causal_mask = torch.triu(
+                    torch.full((y_in.size(1), y_in.size(1)), float("-inf"), device=y_in.device),
+                    diagonal=1
+                )
+
+                dec_out = self.decoder(
+                    tgt=tgt_emb,
+                    memory=inputs_embeds,
+                    tgt_mask=causal_mask,
+                    tgt_key_padding_mask=tgt_key_padding_mask,
+                    memory_key_padding_mask=memory_key_padding_mask
+                )
+                logits = self.lm_head(dec_out)
+                ce_loss = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)).float(),
+                    y_out_masked.reshape(-1),
+                    label_smoothing=getattr(self.args, 'label_smoothing', 0.0),
+                    ignore_index=-100
+                )
             
             out["ce_loss"] = ce_loss.detach()
             out["loss"] = ce_loss
@@ -229,8 +284,11 @@ class Uni_Sign(nn.Module):
                 pose_emb = self.pose_proj(pose_features_biased)
                 prefix_ids    = pc["prefix_ids"].long()
                 prefix_mask   = pc["prefix_mask"]
-
-                inputs_embeds  = torch.cat([self.mt5_model.encoder.embed_tokens(prefix_ids), pose_emb], dim=1)
+                if self.text_decoder == "mt5":
+                    prefix_emb = self.mt5_model.encoder.embed_tokens(prefix_ids)
+                else:
+                    prefix_emb = self.prefix_embed(prefix_ids)
+                inputs_embeds  = torch.cat([prefix_emb, pose_emb], dim=1)
                 attention_mask = torch.cat([prefix_mask, pc["attention_mask"]], dim=1)
                 pc_out = {"inputs_embeds": inputs_embeds, "attention_mask": attention_mask}
             else:
@@ -238,13 +296,43 @@ class Uni_Sign(nn.Module):
         else:
             pc_out = pc
 
-        return self.mt5_model.generate(
-            inputs_embeds  = pc_out["inputs_embeds"],
-            attention_mask = pc_out["attention_mask"],
-            max_new_tokens = max_new_tokens,
-            num_beams      = num_beams,
-            **kwargs
-        )
+        if self.text_decoder == "mt5":
+            return self.mt5_model.generate(
+                inputs_embeds  = pc_out["inputs_embeds"],
+                attention_mask = pc_out["attention_mask"],
+                max_new_tokens = max_new_tokens,
+                num_beams      = num_beams,
+                **kwargs
+            )
+
+        memory = pc_out["inputs_embeds"]
+        memory_key_padding_mask = ~pc_out["attention_mask"].bool()
+        batch_size = memory.size(0)
+        start_id = self.mt5_tokenizer.pad_token_id
+        eos_id = self.mt5_tokenizer.eos_token_id
+        ys = torch.full((batch_size, 1), start_id, dtype=torch.long, device=memory.device)
+
+        for _ in range(max_new_tokens):
+            tgt_emb = self.tgt_embed(ys) + self.pos_embed(
+                torch.arange(ys.size(1), device=ys.device).unsqueeze(0)
+            )
+            causal_mask = torch.triu(
+                torch.full((ys.size(1), ys.size(1)), float("-inf"), device=ys.device),
+                diagonal=1
+            )
+            dec_out = self.decoder(
+                tgt=tgt_emb,
+                memory=memory,
+                tgt_mask=causal_mask,
+                tgt_key_padding_mask=(ys == self.mt5_tokenizer.pad_token_id),
+                memory_key_padding_mask=memory_key_padding_mask,
+            )
+            next_token = self.lm_head(dec_out[:, -1]).argmax(dim=-1, keepdim=True)
+            ys = torch.cat([ys, next_token], dim=1)
+            if eos_id is not None and torch.all(next_token.squeeze(1) == eos_id):
+                break
+
+        return ys[:, 1:]
 
 # ============================================================================ #
 #  Helper function for checkpoint saving (Required by fine_tuning.py)

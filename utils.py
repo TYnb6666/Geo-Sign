@@ -369,6 +369,8 @@ def get_args_parser():
     # --- Model Parameters ---
     parser.add_argument('--hidden_dim', default=768, type=int, help='Transformer hidden dimension')
     parser.add_argument('--gcn_out_dim', default=256, type=int, help='GCN output dimension')
+    parser.add_argument('--text_decoder', default='mt5', type=str, choices=['mt5', 'transformer'],
+                        help='Text decoder backend: pretrained mT5 or lightweight Transformer decoder')
     
     # 【新增】支持自定义输入通道数
     parser.add_argument('--input_channels', default=3, type=int, 
