@@ -377,6 +377,9 @@ def get_args_parser():
     # --- Dataset Parameters ---
     parser.add_argument('--dataset', default='CSL_Daily', type=str, help='dataset name')
     parser.add_argument('--task', default='SLT', type=str, help='task name')
+    parser.add_argument('--mode', default='hand_body_face', type=str,
+                        choices=['hand', 'hand_body', 'hand_body_face'],
+                        help='data mode: hand (hands only), hand_body (hands+body), hand_body_face (all)')
     parser.add_argument('--max_length', default=256, type=int, help='max frame length')
     parser.add_argument('--max_eval_samples', default=1000, type=int, help='max eval samples')
 

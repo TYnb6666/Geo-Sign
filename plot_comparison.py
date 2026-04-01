@@ -5,7 +5,7 @@ import numpy as np
 # 读取三个log文件
 log_files = {
     'Hand Only': '/data/taoye/Geo-Sign/out/train_pure_hand_4D/log.txt',
-    'Hand + Body': '/data/taoye/Geo-Sign/out/body_4d_train/log.txt',
+    'Hand + Body': '/data/taoye/Geo-Sign/out/train_hand_body_4D/log.txt',
     'Hand + Body + Face': '/data/taoye/Geo-Sign/out/train_hand_body_face_4D/log.txt'
 }
 

@@ -40,8 +40,23 @@ class Uni_Sign(nn.Module):
         super().__init__()
         self.args = args
 
-        # 支持 body, left, right, face_all 四种模式
-        self.modes = ["body", "left", "right", "face_all"]
+        # 根据 args.mode 选择模式
+        # hand: 仅手部 ["left", "right"]
+        # hand_body: 手部+身体 ["body", "left", "right"]
+        # hand_body_face: 全部 ["body", "left", "right", "face_all"]
+        mode_choice = getattr(args, 'mode', 'hand_body_face')
+
+        MODE_TO_MODES = {
+            "hand": ["left", "right"],
+            "hand_body": ["body", "left", "right"],
+            "hand_body_face": ["body", "left", "right", "face_all"]
+        }
+
+        if mode_choice not in MODE_TO_MODES:
+            raise ValueError(f"Invalid mode '{mode_choice}'. Must be one of {list(MODE_TO_MODES.keys())}")
+
+        self.modes = MODE_TO_MODES[mode_choice]
+        self.mode = mode_choice  # 保存选择的 mode
 
         initial_gcn_dim = 64
 
@@ -49,7 +64,7 @@ class Uni_Sign(nn.Module):
         initial_input_dim = getattr(args, 'input_channels', 4)  # 默认 4D: [x, y, z, conf]
 
         print(f"✅ Uni-Sign Model Initialized with Input Channels: {initial_input_dim}")
-        print(f"✅ Modes: {self.modes}")
+        print(f"✅ Mode: {self.mode} -> Modes: {self.modes}")
 
         # 1. Build Graph & Projection Layers
         self.graph, As, self.proj_linear = {}, [], nn.ModuleDict()

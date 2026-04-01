@@ -351,13 +351,24 @@ class S2T_Dataset(Dataset.Dataset):
         src_input = {}
         tgt_input = {}
 
-        # 1. 处理 Pose Data (包括 body, left, right, face_all)
-        for mode in ['body', 'left', 'right', 'face_all']:
+        # 根据 mode 决定使用哪些数据
+        mode_choice = getattr(self.args, 'mode', 'hand_body_face')
+
+        MODE_TO_KEYS = {
+            "hand": ['left', 'right'],
+            "hand_body": ['body', 'left', 'right'],
+            "hand_body_face": ['body', 'left', 'right', 'face_all']
+        }
+
+        active_keys = MODE_TO_KEYS.get(mode_choice, ['body', 'left', 'right', 'face_all'])
+
+        # 1. 处理 Pose Data (根据 mode 选择)
+        for key in active_keys:
             # 检查该 key 是否存在于所有样本中
-            if mode in batch[0]['pose']:
-                features = [torch.from_numpy(b['pose'][mode]).float() for b in batch]
+            if key in batch[0]['pose']:
+                features = [torch.from_numpy(b['pose'][key]).float() for b in batch]
                 padded = pad_sequence(features, batch_first=True, padding_value=0.0)
-                src_input[mode] = padded
+                src_input[key] = padded
 
         # 2. 处理 Attention Mask
         lengths = [len(b['pose']['left']) for b in batch]
