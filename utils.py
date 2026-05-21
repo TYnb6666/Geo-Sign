@@ -369,6 +369,8 @@ def get_args_parser():
     # --- Model Parameters ---
     parser.add_argument('--hidden_dim', default=768, type=int, help='Transformer hidden dimension')
     parser.add_argument('--gcn_out_dim', default=256, type=int, help='GCN output dimension')
+    parser.add_argument('--text_decoder', default='mt5', type=str, choices=['mt5', 'transformer'],
+                        help='Text decoder backend: pretrained mT5 or lightweight Transformer decoder')
     
     # 【新增】支持自定义输入通道数
     parser.add_argument('--input_channels', default=3, type=int, 
@@ -386,9 +388,17 @@ def get_args_parser():
     # --- Checkpoints & Output ---
     parser.add_argument('--output_dir', default='', help='path to save checkpoints')
     parser.add_argument('--finetune', default='', help='finetune from checkpoint')
+    parser.add_argument('--auto_resume', action='store_true',
+                        help='Auto resume from latest checkpoint_*.pth in output_dir')
+    parser.add_argument('--resume_checkpoint', default='',
+                        help='Explicit checkpoint path for resume (overrides auto latest)')
     parser.add_argument('--load_checkpoint_dir', default='', help='load checkpoint dir')
     parser.add_argument('--save_batch_name', default='testing', help='name for saved batch')
     parser.add_argument('--save_one_batch', action='store_true', help='save one batch for debug')
+    parser.add_argument('--save_eval_predictions', action='store_true',
+                        help='Save eval predictions/references as JSONL files')
+    parser.add_argument('--save_eval_raw_2d', action='store_true',
+                        help='Save raw 2D keypoints (x,y) with predictions during evaluation')
 
     # --- Hyperbolic / Graph Parameters ---
     parser.add_argument('--use_hyperbolic', action='store_true', help='Use Hyperbolic Geometry')

@@ -230,9 +230,34 @@ def main(args):
         warnings.warn("--load_checkpoint_dir specified but script uses --finetune for pre-DS loading. DS checkpoint loading ignored.")
 
     output_dir = Path(args.output_dir) if args.output_dir else None
-    start_time = time.time()
     max_accuracy = 0.0
     if args.task == "CSLR": max_accuracy = 1000.0
+    resume_ckpt = None
+    if output_dir and getattr(args, 'auto_resume', False):
+        resume_candidate = Path(args.resume_checkpoint) if getattr(args, 'resume_checkpoint', '') else None
+        if resume_candidate is None:
+            ckpts = sorted(output_dir.glob("checkpoint_*.pth"), key=lambda p: p.stat().st_mtime)
+            if ckpts:
+                resume_candidate = ckpts[-1]
+        if resume_candidate and resume_candidate.exists():
+            if rank == 0:
+                print(f"[AutoResume] Loading checkpoint: {resume_candidate}")
+            resume_ckpt = torch.load(resume_candidate, map_location='cpu', weights_only=False)
+            resume_state = resume_ckpt.get('model', resume_ckpt)
+            ret = model_without_ddp.load_state_dict(resume_state, strict=False)
+            if rank == 0:
+                if ret.missing_keys:
+                    print("[AutoResume] Missing keys:\n", "\n".join(ret.missing_keys))
+                if ret.unexpected_keys:
+                    print("[AutoResume] Unexpected keys:\n", "\n".join(ret.unexpected_keys))
+            if 'epoch' in resume_ckpt:
+                start_epoch = int(resume_ckpt['epoch']) + 1
+            if 'max_accuracy' in resume_ckpt:
+                max_accuracy = float(resume_ckpt['max_accuracy'])
+            if rank == 0:
+                print(f"[AutoResume] Resuming from epoch {start_epoch}")
+
+    start_time = time.time()
 
     if args.eval: 
         if rank == 0: print("Evaluation mode enabled. Running evaluation...")
@@ -510,6 +535,7 @@ def evaluate(args: argparse.Namespace,
 
     tgt_pres_text_local: List[str] = []
     tgt_refs_text_local: List[str] = []
+    raw_2d_records_local: List[Dict[str, Any]] = []
 
     collected_figure_data_first_batch: Optional[Dict[str, Any]] = None
     save_one_batch_flag: bool = getattr(args, 'save_one_batch', False)
@@ -606,6 +632,15 @@ def evaluate(args: argparse.Namespace,
                 tgt_refs_text_local.extend(list(tgt_input['gt_sentence']))
             else: 
                 tgt_refs_text_local.extend([""] * len(decoded_preds))
+            if getattr(args, 'save_eval_raw_2d', False):
+                for bi, pred_text in enumerate(decoded_preds):
+                    rec: Dict[str, Any] = {"prediction": pred_text}
+                    if 'gt_sentence' in tgt_input and bi < len(tgt_input['gt_sentence']):
+                        rec["reference"] = tgt_input['gt_sentence'][bi]
+                    for mode in ["body", "left", "right", "face_all"]:
+                        if mode in src_input and isinstance(src_input[mode], torch.Tensor):
+                            rec[f"{mode}_2d"] = src_input[mode][bi, :, :, :2].detach().cpu().float().tolist()
+                    raw_2d_records_local.append(rec)
         except Exception as e:
             print(f"\n[Rank {rank}] Error during decoding/storing texts at step {step}, phase {phase}: {e}")
             bs = src_input.get(next(iter(src_input)), torch.tensor([])).shape[0] # type: ignore
@@ -673,6 +708,26 @@ def evaluate(args: argparse.Namespace,
                     for line in formatted_refs: f.write(line + '\n')
                 print(f"[Rank 0] Saved {phase} predictions to {pred_p} and references to {ref_p}")
             except IOError as e: print(f"[Rank 0] ERROR saving {phase} eval text files: {e}")
+
+        if args.output_dir and getattr(args, 'save_eval_predictions', False) and formatted_pres:
+            try:
+                pred_json_path = Path(args.output_dir) / f'{phase}_predictions.jsonl'
+                with open(pred_json_path, 'w', encoding='utf-8') as f:
+                    for i, p in enumerate(formatted_pres):
+                        obj = {"prediction": p, "reference": formatted_refs[i] if i < len(formatted_refs) else ""}
+                        f.write(json.dumps(obj, ensure_ascii=False) + '\n')
+                print(f"[Rank 0] Saved {phase} predictions JSONL to {pred_json_path}")
+            except IOError as e:
+                print(f"[Rank 0] ERROR saving {phase} prediction JSONL: {e}")
+
+        if args.output_dir and getattr(args, 'save_eval_raw_2d', False) and raw_2d_records_local:
+            try:
+                raw2d_path = Path(args.output_dir) / f'{phase}_raw2d_and_predictions.json'
+                with open(raw2d_path, 'w', encoding='utf-8') as f:
+                    json.dump(raw_2d_records_local, f, ensure_ascii=False)
+                print(f"[Rank 0] Saved {phase} raw 2D + predictions to {raw2d_path}")
+            except IOError as e:
+                print(f"[Rank 0] ERROR saving {phase} raw 2D JSON: {e}")
 
         # --- Save Accumulated Evaluation Figure Data (Rank 0 Only) ---
         if args.eval and accumulated_eval_samples_for_phase: 
